@@ -1,0 +1,50 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Word Deck</title>
+</head>
+<body style="font-family: -apple-system, system-ui, sans-serif; padding: 20px;">
+  <h1>Word Deck</h1>
+
+  <input id="word" placeholder="Word" style="padding:10px; font-size:16px;" />
+  <button id="add" style="padding:10px; font-size:16px;">Add</button>
+
+  <ul id="list"></ul>
+
+  <script>
+    const KEY = "words_v1";
+    const list = document.getElementById("list");
+    const input = document.getElementById("word");
+
+    function load() {
+      return JSON.parse(localStorage.getItem(KEY) || "[]");
+    }
+    function save(words) {
+      localStorage.setItem(KEY, JSON.stringify(words));
+    }
+    function render() {
+      const words = load();
+      list.innerHTML = "";
+      for (const w of words) {
+        const li = document.createElement("li");
+        li.textContent = w;
+        list.appendChild(li);
+      }
+    }
+
+    document.getElementById("add").addEventListener("click", () => {
+      const w = input.value.trim();
+      if (!w) return;
+      const words = load();
+      words.unshift(w);
+      save(words);
+      input.value = "";
+      render();
+    });
+
+    render();
+  </script>
+</body>
+</html>
