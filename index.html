@@ -328,9 +328,7 @@ function formatDef(def) {
 
   // ---------- Add / Study / Delete ----------
   function addEntry() {
-    const word = capitalizeWord(
-  els.word.value.trim().toLowerCase()
-);
+    const word = els.word.value.trim();
     const meaning = els.meaning.value.trim();
     if (!word) return;
 
