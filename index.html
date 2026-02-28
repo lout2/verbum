@@ -1,4 +1,428 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Word Deck</title>
+  <meta name="theme-color" content="#e6e6e6" />
+  <style>
+    /* Lighter gray theme (buttons keep their colors) */
+    body {
+      font-family: -apple-system, system-ui, sans-serif;
+      margin: 0;
+      background: #e6e6e6;
+      color: #111;
+    }
+    .wrap { max-width: 720px; margin: 0 auto; padding: 20px; }
+    h1 { font-size: 22px; margin: 0 0 12px; color:#111; }
 
-const word = capitalizeWord(
+    .row { display:flex; gap:10px; flex-wrap:wrap; }
+
+    input, button, select {
+      border-radius: 12px;
+      border: 1px solid #cfcfcf;
+      padding: 12px 14px;
+      font-size: 16px;
+      background: #f7f7f7;
+      color: #111;
+    }
+    input { flex: 1 1 220px; }
+
+    button { cursor: pointer; }
+    button.primary { background:#1f6feb; border-color:#1f6feb; color:#fff; }
+    button.danger  { background:#b42318; border-color:#b42318; color:#fff; }
+
+    .card {
+      background:#f3f3f3;
+      border: 1px solid #cfcfcf;
+      border-radius: 16px;
+      padding: 14px;
+      margin-top: 14px;
+    }
+
+    .meta { color:#555; font-size: 13px; }
+
+    .list { margin-top: 14px; display:flex; flex-direction:column; gap:10px; }
+
+    .item {
+      padding: 12px;
+      border: 1px solid #cfcfcf;
+      border-radius: 14px;
+      background: #f9f9f9;
+    }
+
+    .topline { display:flex; justify-content:space-between; gap:10px; align-items:flex-start; }
+    .wordline { display:flex; gap:8px; align-items:baseline; flex-wrap:wrap; }
+    .wordline b { font-size: 16px; }
+
+    .datefaint { color:#777; font-size: 14px; font-weight: 400; }
+
+    .actions { display:flex; gap:8px; flex-wrap:wrap; justify-content:flex-end; }
+    .small { font-size: 13px; padding: 8px 10px; border-radius: 10px; }
+
+    .panel { margin-top:10px; border-top:1px solid #d9d9d9; padding-top:10px; }
+    .panel .pos { font-size:13px; color:#666; }
+    .panel .def { margin-top:6px; color:#111; }
+    .panel .ex  { margin-top:8px; font-style:italic; color:#333; }
+    .panel .err { color:#b42318; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>Word Deck</h1>
+
+    <div class="card">
+      <div class="row">
+        <input id="word" placeholder="Word" autocomplete="off" />
+        <input id="meaning" placeholder="Your note (optional)" autocomplete="off" />
+      </div>
+      <div class="row" style="margin-top:10px;">
+        <button class="primary" id="add">Add</button>
+        <button id="study">Study random</button>
+      </div>
+      <div class="meta" id="count" style="margin-top:10px;"></div>
+    </div>
+
+    <div class="card">
+      <div class="row">
+        <input id="search" placeholder="Search…" />
+        <button class="danger" id="wipe">Wipe all</button>
+      </div>
+      <div class="list" id="list"></div>
+    </div>
+  </div>
+
+<script>
+  // ---------- Storage keys ----------
+  const WORDS_KEY = "word_deck_words_v3";
+  const DEFS_KEY  = "word_deck_defs_v1"; // dictionary cache by word (lowercased)
+
+  /**
+   * @typedef {{
+   *  id: string,
+   *  word: string,
+   *  meaning: string,
+   *  createdAt: number
+   * }} Entry
+   */
+
+  const els = {
+    word: document.getElementById("word"),
+    meaning: document.getElementById("meaning"),
+    add: document.getElementById("add"),
+    study: document.getElementById("study"),
+    search: document.getElementById("search"),
+    wipe: document.getElementById("wipe"),
+    list: document.getElementById("list"),
+    count: document.getElementById("count"),
+  };
+
+  // ---------- Utilities ----------
+  function uid() {
+    return Math.random().toString(16).slice(2) + Date.now().toString(16);
+  }
+
+  function escapeHtml(s) {
+    return String(s).replace(/[&<>"']/g, c => ({
+      "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#039;"
+    }[c]));
+  }
+
+  function formatDate(ts) {
+    const d = new Date(ts);
+    // Example: "February 28, 2026"
+    return d.toLocaleDateString(undefined, { month:"long", day:"numeric", year:"numeric" });
+  }
+
+  function normalizeWordKey(word) {
+    return word.trim().toLowerCase();
+  }
+
+  // ---------- Load/Save (with migration from prior versions) ----------
+  function loadEntries() {
+    let raw = null;
+
+    // Try current key first
+    try { raw = JSON.parse(localStorage.getItem(WORDS_KEY)); } catch { raw = null; }
+
+    // Migrate from older keys if needed
+    if (!Array.isArray(raw)) {
+      const legacyKeys = ["word_deck_words_v2", "word_deck_v1", "words_v1", "words"];
+      for (const k of legacyKeys) {
+        try {
+          const v = JSON.parse(localStorage.getItem(k));
+          if (Array.isArray(v) && v.length) { raw = v; break; }
+        } catch {}
+      }
+    }
+
+    if (!Array.isArray(raw)) return [];
+
+    const migrated = raw.map((x) => {
+      // Old simplest format: ["profound", "ephemeral"]
+      if (typeof x === "string") {
+        return /** @type {Entry} */({
+          id: uid(),
+          word: x,
+          meaning: "",
+          createdAt: Date.now()
+        });
+      }
+
+      // Newer object formats (pick what we can)
+      if (x && typeof x === "object") {
+        const word = typeof x.word === "string" ? x.word : (typeof x.text === "string" ? x.text : "");
+        return /** @type {Entry} */({
+          id: typeof x.id === "string" ? x.id : uid(),
+          word: word || "",
+          meaning: typeof x.meaning === "string" ? x.meaning : "",
+          createdAt: typeof x.createdAt === "number" ? x.createdAt : (typeof x.added === "number" ? x.added : Date.now())
+        });
+      }
+
+      return /** @type {Entry} */({ id: uid(), word: "", meaning: "", createdAt: Date.now() });
+    }).filter(e => e.word.trim().length > 0);
+
+    localStorage.setItem(WORDS_KEY, JSON.stringify(migrated));
+    return migrated;
+  }
+
+  function saveEntries(entries) {
+    localStorage.setItem(WORDS_KEY, JSON.stringify(entries));
+  }
+
+  function loadDefs() {
+    try { return JSON.parse(localStorage.getItem(DEFS_KEY)) ?? {}; }
+    catch { return {}; }
+  }
+
+  function saveDefs(defs) {
+    localStorage.setItem(DEFS_KEY, JSON.stringify(defs));
+  }
+
+  // ---------- Dictionary fetch ----------
+  // Uses dictionaryapi.dev (English). Examples may not exist for every word.
+// Uses FreeDictionaryAPI.com (v1)
+// Uses FreeDictionaryAPI.com (v1) — prefers examples, falls back to quotes
+// FreeDictionaryAPI — return up to 3 examples or quotes
+async function fetchDefinition(word) {
+  const url = `https://freedictionaryapi.com/api/v1/entries/en/${encodeURIComponent(word)}`;
+  const res = await fetch(url);
+  if (!res.ok) throw new Error("No definition found");
+
+  const data = await res.json();
+  const entry = data?.entries?.[0];
+  if (!entry) throw new Error("No entry");
+
+  // Flatten senses + subsenses
+  const flatSenses = [];
+  const stack = [...(entry.senses || [])];
+
+  while (stack.length) {
+    const s = stack.shift();
+    if (!s) continue;
+
+    flatSenses.push(s);
+
+    if (Array.isArray(s.subsenses)) {
+      stack.push(...s.subsenses);
+    }
+  }
+
+  // Choose best sense
+  const sense =
+    flatSenses.find(s => s.examples?.length) ||
+    flatSenses.find(s => s.quotes?.length) ||
+    flatSenses.find(s => s.definition);
+
+  if (!sense) throw new Error("No usable sense");
+
+  let examples = [];
+
+  if (sense.examples?.length) {
+    examples = sense.examples.slice(0, 3);
+  } else if (sense.quotes?.length) {
+    examples = sense.quotes
+      .slice(0, 3)
+      .map(q => q.text);
+  }
+
+  return {
+    partOfSpeech: entry.partOfSpeech || "",
+    definition: sense.definition || "",
+    examples
+  };
+}
+
+function formatDef(def) {
+  const pos = def.partOfSpeech
+    ? `<div class="pos">${escapeHtml(def.partOfSpeech)}</div>`
+    : "";
+
+  const definition = def.definition
+    ? `<div class="def">${escapeHtml(def.definition)}</div>`
+    : "";
+
+  let examplesHTML = "";
+
+  if (Array.isArray(def.examples) && def.examples.length) {
+    examplesHTML = def.examples
+      .map(ex => `<div class="ex">“${escapeHtml(ex)}”</div>`)
+      .join("");
+  }
+
+  return `${pos}${definition}${examplesHTML}`;
+}
+
+  // ---------- App state ----------
+  let entries = loadEntries();
+
+  // ---------- Render ----------
+  function render() {
+    const q = els.search.value.trim().toLowerCase();
+
+    const filtered = entries
+      .filter(e => !q ? true : (e.word.toLowerCase().includes(q) || e.meaning.toLowerCase().includes(q)))
+      .sort((a,b) => b.createdAt - a.createdAt);
+
+    els.count.textContent = `${entries.length} total • showing ${filtered.length}`;
+
+    els.list.innerHTML = "";
+
+    for (const e of filtered) {
+      const div = document.createElement("div");
+      div.className = "item";
+
+      const wordSafe = escapeHtml(e.word);
+      const dateSafe = escapeHtml(formatDate(e.createdAt));
+
+      div.innerHTML = `
+        <div class="topline">
+          <div>
+            <div class="wordline">
+              <b>${wordSafe}</b>
+              <span class="datefaint">… ${dateSafe}</span>
+            </div>
+            ${e.meaning ? `<div class="meta" style="margin-top:6px;">${escapeHtml(e.meaning)}</div>` : ""}
+          </div>
+
+          <div class="actions">
+            <button class="small" data-act="toggle" data-word="${wordSafe}">Details</button>
+            <button class="small danger" data-act="del" data-id="${e.id}">Delete</button>
+          </div>
+        </div>
+
+        <div class="panel" data-panel="${wordSafe}" style="display:none;">
+          <div class="meta">Fetching happens when you open Details.</div>
+        </div>
+      `;
+
+      els.list.appendChild(div);
+    }
+  }
+
+  function capitalizeWord(word) {
+  if (!word) return word;
+  return word.charAt(0).toUpperCase() + word.slice(1);
+}
+
+  // ---------- Add / Study / Delete ----------
+  function addEntry() {
+    const word = capitalizeWord(
   els.word.value.trim().toLowerCase()
 );
+    const meaning = els.meaning.value.trim();
+    if (!word) return;
+
+    const entry = /** @type {Entry} */({
+      id: uid(),
+      word,
+      meaning,
+      createdAt: Date.now()
+    });
+
+    entries.unshift(entry);
+    saveEntries(entries);
+
+    els.word.value = "";
+    els.meaning.value = "";
+    els.word.focus();
+    render();
+  }
+
+  function studyRandom() {
+    if (!entries.length) return alert("No words yet.");
+    const pick = entries[Math.floor(Math.random() * entries.length)];
+    alert(`${pick.word}\n\n${pick.meaning || "(no note yet)"}\n\nAdded: ${formatDate(pick.createdAt)}`);
+  }
+
+  // ---------- Wire up UI ----------
+  els.add.addEventListener("click", addEntry);
+  els.word.addEventListener("keydown", (e) => { if (e.key === "Enter") addEntry(); });
+  els.meaning.addEventListener("keydown", (e) => { if (e.key === "Enter") addEntry(); });
+  els.study.addEventListener("click", studyRandom);
+
+  els.search.addEventListener("input", render);
+
+  els.wipe.addEventListener("click", () => {
+    if (!confirm("Delete everything?")) return;
+    entries = [];
+    saveEntries(entries);
+    localStorage.removeItem(DEFS_KEY);
+    render();
+  });
+
+  // Event delegation for buttons inside the list
+  els.list.addEventListener("click", async (ev) => {
+    const btn = ev.target.closest("button");
+    if (!btn) return;
+
+    const act = btn.getAttribute("data-act");
+
+    // Toggle dictionary details
+    if (act === "toggle") {
+      const word = btn.getAttribute("data-word") || "";
+      const panel = els.list.querySelector(`[data-panel="${CSS.escape(word)}"]`);
+      if (!panel) return;
+
+      const isOpen = panel.style.display !== "none";
+      if (isOpen) { panel.style.display = "none"; return; }
+      panel.style.display = "block";
+
+      const key = normalizeWordKey(word);
+      const defs = loadDefs();
+
+      if (defs[key]) {
+        panel.innerHTML = formatDef(defs[key]);
+        return;
+      }
+
+      panel.innerHTML = `<div class="meta">Fetching definition…</div>`;
+      try {
+        const def = await fetchDefinition(word);
+        defs[key] = def;
+        saveDefs(defs);
+        panel.innerHTML = formatDef(def);
+      } catch (err) {
+        panel.innerHTML = `<div class="err">No definition found (or network issue).</div>`;
+      }
+      return;
+    }
+
+    // Delete by id
+    if (act === "del") {
+      const id = btn.getAttribute("data-id");
+      if (!id) return;
+      const idx = entries.findIndex(x => x.id === id);
+      if (idx < 0) return;
+
+      entries.splice(idx, 1);
+      saveEntries(entries);
+      render();
+    }
+  });
+
+  render();
+</script>
+</body>
+</html>
