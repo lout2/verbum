@@ -18,7 +18,7 @@
 
     .row { display:flex; gap:10px; flex-wrap:wrap; }
 
-    input, button, select {
+    input, button {
       border-radius: 12px;
       border: 1px solid #cfcfcf;
       padding: 12px 14px;
@@ -73,7 +73,7 @@
 
     <div class="card">
       <div class="row">
-        <input id="word" placeholder="Word" autocomplete="off" />
+        <input id="word" placeholder="Word (e.g., profound)" autocomplete="off" />
         <input id="meaning" placeholder="Your note (optional)" autocomplete="off" />
       </div>
       <div class="row" style="margin-top:10px;">
@@ -94,8 +94,8 @@
 
 <script>
   // ---------- Storage keys ----------
-  const WORDS_KEY = "word_deck_words_v3";
-  const DEFS_KEY  = "word_deck_defs_v1"; // dictionary cache by word (lowercased)
+  const WORDS_KEY = "word_deck_words_v4";
+  const DEFS_KEY  = "word_deck_defs_v2"; // dictionary cache by normalized word (lowercased)
 
   /**
    * @typedef {{
@@ -130,12 +130,17 @@
 
   function formatDate(ts) {
     const d = new Date(ts);
-    // Example: "February 28, 2026"
     return d.toLocaleDateString(undefined, { month:"long", day:"numeric", year:"numeric" });
   }
 
   function normalizeWordKey(word) {
     return word.trim().toLowerCase();
+  }
+
+  // Auto-capitalize for display/storage (keeps lookup lowercase separately)
+  function capitalizeFirstLetter(text) {
+    if (!text) return text;
+    return text.charAt(0).toUpperCase() + text.slice(1);
   }
 
   // ---------- Load/Save (with migration from prior versions) ----------
@@ -147,7 +152,7 @@
 
     // Migrate from older keys if needed
     if (!Array.isArray(raw)) {
-      const legacyKeys = ["word_deck_words_v2", "word_deck_v1", "words_v1", "words"];
+      const legacyKeys = ["word_deck_words_v3", "word_deck_words_v2", "word_deck_v1", "words_v1", "words"];
       for (const k of legacyKeys) {
         try {
           const v = JSON.parse(localStorage.getItem(k));
@@ -163,20 +168,25 @@
       if (typeof x === "string") {
         return /** @type {Entry} */({
           id: uid(),
-          word: x,
+          word: capitalizeFirstLetter(x.trim()),
           meaning: "",
           createdAt: Date.now()
         });
       }
 
-      // Newer object formats (pick what we can)
+      // Object formats
       if (x && typeof x === "object") {
-        const word = typeof x.word === "string" ? x.word : (typeof x.text === "string" ? x.text : "");
+        const wordRaw =
+          typeof x.word === "string" ? x.word :
+          (typeof x.text === "string" ? x.text : "");
+
         return /** @type {Entry} */({
           id: typeof x.id === "string" ? x.id : uid(),
-          word: word || "",
+          word: capitalizeFirstLetter((wordRaw || "").trim()),
           meaning: typeof x.meaning === "string" ? x.meaning : "",
-          createdAt: typeof x.createdAt === "number" ? x.createdAt : (typeof x.added === "number" ? x.added : Date.now())
+          createdAt:
+            typeof x.createdAt === "number" ? x.createdAt :
+            (typeof x.added === "number" ? x.added : Date.now())
         });
       }
 
@@ -201,78 +211,74 @@
   }
 
   // ---------- Dictionary fetch ----------
-  // Uses dictionaryapi.dev (English). Examples may not exist for every word.
-// Uses FreeDictionaryAPI.com (v1)
-// Uses FreeDictionaryAPI.com (v1) — prefers examples, falls back to quotes
-// FreeDictionaryAPI — return up to 3 examples or quotes
-async function fetchDefinition(word) {
-  const url = `https://freedictionaryapi.com/api/v1/entries/en/${encodeURIComponent(word)}`;
-  const res = await fetch(url);
-  if (!res.ok) throw new Error("No definition found");
+  // FreeDictionaryAPI — return up to 3 examples (or quotes if examples missing)
+  async function fetchDefinition(wordLower) {
+    const url = `https://freedictionaryapi.com/api/v1/entries/en/${encodeURIComponent(wordLower)}`;
+    const res = await fetch(url);
+    if (!res.ok) throw new Error("No definition found");
 
-  const data = await res.json();
-  const entry = data?.entries?.[0];
-  if (!entry) throw new Error("No entry");
+    const data = await res.json();
+    const entry = data?.entries?.[0];
+    if (!entry) throw new Error("No entry");
 
-  // Flatten senses + subsenses
-  const flatSenses = [];
-  const stack = [...(entry.senses || [])];
+    // Flatten senses + subsenses
+    const flatSenses = [];
+    const stack = [...(entry.senses || [])];
 
-  while (stack.length) {
-    const s = stack.shift();
-    if (!s) continue;
-
-    flatSenses.push(s);
-
-    if (Array.isArray(s.subsenses)) {
-      stack.push(...s.subsenses);
+    while (stack.length) {
+      const s = stack.shift();
+      if (!s) continue;
+      flatSenses.push(s);
+      if (Array.isArray(s.subsenses)) stack.push(...s.subsenses);
     }
+
+    // Choose best sense: prefer those with examples, else quotes, else definition
+    const sense =
+      flatSenses.find(s => Array.isArray(s.examples) && s.examples.length) ||
+      flatSenses.find(s => Array.isArray(s.quotes) && s.quotes.length) ||
+      flatSenses.find(s => typeof s.definition === "string" && s.definition.trim());
+
+    if (!sense) throw new Error("No usable sense");
+
+    let examples = [];
+    let sourceLabel = ""; // "Example" vs "Quote" label
+
+    if (Array.isArray(sense.examples) && sense.examples.length) {
+      examples = sense.examples.slice(0, 3);
+      sourceLabel = "Example";
+    } else if (Array.isArray(sense.quotes) && sense.quotes.length) {
+      examples = sense.quotes.slice(0, 3).map(q => q?.text).filter(Boolean);
+      sourceLabel = "Quote";
+    }
+
+    return {
+      partOfSpeech: entry.partOfSpeech || "",
+      definition: sense.definition || "",
+      examples,
+      sourceLabel
+    };
   }
 
-  // Choose best sense
-  const sense =
-    flatSenses.find(s => s.examples?.length) ||
-    flatSenses.find(s => s.quotes?.length) ||
-    flatSenses.find(s => s.definition);
+  function formatDef(def) {
+    const pos = def.partOfSpeech
+      ? `<div class="pos">${escapeHtml(def.partOfSpeech)}</div>`
+      : "";
 
-  if (!sense) throw new Error("No usable sense");
+    const definition = def.definition
+      ? `<div class="def">${escapeHtml(def.definition)}</div>`
+      : "";
 
-  let examples = [];
+    let examplesHTML = "";
+    if (Array.isArray(def.examples) && def.examples.length) {
+      const label = def.sourceLabel ? `${escapeHtml(def.sourceLabel)}${def.examples.length > 1 ? "s" : ""}:` : "";
+      examplesHTML =
+        (label ? `<div class="meta" style="margin-top:10px;">${label}</div>` : "") +
+        def.examples.map(ex => `<div class="ex">“${escapeHtml(ex)}”</div>`).join("");
+    }
 
-  if (sense.examples?.length) {
-    examples = sense.examples.slice(0, 3);
-  } else if (sense.quotes?.length) {
-    examples = sense.quotes
-      .slice(0, 3)
-      .map(q => q.text);
+    if (!pos && !definition && !examplesHTML) return `<div class="meta">No definition/example returned.</div>`;
+    return `${pos}${definition}${examplesHTML}`;
   }
-
-  return {
-    partOfSpeech: entry.partOfSpeech || "",
-    definition: sense.definition || "",
-    examples
-  };
-}
-
-function formatDef(def) {
-  const pos = def.partOfSpeech
-    ? `<div class="pos">${escapeHtml(def.partOfSpeech)}</div>`
-    : "";
-
-  const definition = def.definition
-    ? `<div class="def">${escapeHtml(def.definition)}</div>`
-    : "";
-
-  let examplesHTML = "";
-
-  if (Array.isArray(def.examples) && def.examples.length) {
-    examplesHTML = def.examples
-      .map(ex => `<div class="ex">“${escapeHtml(ex)}”</div>`)
-      .join("");
-  }
-
-  return `${pos}${definition}${examplesHTML}`;
-}
 
   // ---------- App state ----------
   let entries = loadEntries();
@@ -321,14 +327,11 @@ function formatDef(def) {
     }
   }
 
-  function capitalizeWord(word) {
-  if (!word) return word;
-  return word.charAt(0).toUpperCase() + word.slice(1);
-}
-
   // ---------- Add / Study / Delete ----------
   function addEntry() {
-    const word = els.word.value.trim();
+    // Store/display in Capitalized form, but dictionary lookup will use lowercase key
+    const raw = els.word.value.trim();
+    const word = capitalizeFirstLetter(raw.toLowerCase());
     const meaning = els.meaning.value.trim();
     if (!word) return;
 
@@ -379,15 +382,16 @@ function formatDef(def) {
 
     // Toggle dictionary details
     if (act === "toggle") {
-      const word = btn.getAttribute("data-word") || "";
-      const panel = els.list.querySelector(`[data-panel="${CSS.escape(word)}"]`);
+      const displayWord = btn.getAttribute("data-word") || "";
+      const panel = els.list.querySelector(`[data-panel="${CSS.escape(displayWord)}"]`);
       if (!panel) return;
 
       const isOpen = panel.style.display !== "none";
       if (isOpen) { panel.style.display = "none"; return; }
       panel.style.display = "block";
 
-      const key = normalizeWordKey(word);
+      // Normalize for cache and API lookup (lowercase)
+      const key = normalizeWordKey(displayWord);
       const defs = loadDefs();
 
       if (defs[key]) {
@@ -397,7 +401,7 @@ function formatDef(def) {
 
       panel.innerHTML = `<div class="meta">Fetching definition…</div>`;
       try {
-        const def = await fetchDefinition(word);
+        const def = await fetchDefinition(key); // LOOKUP LOWERCASE
         defs[key] = def;
         saveDefs(defs);
         panel.innerHTML = formatDef(def);
